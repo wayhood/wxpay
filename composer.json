@@ -1,0 +1,20 @@
+{
+    "name": "wayhood/wxpay",
+    "description": "wxpay lib",
+    "type": "yii2-extension",
+    "keywords": ["wxpay","lib"],
+    "license": "BSD-4-Clause",
+    "authors": [
+        {
+            "name": "Song Yeung",
+            "email": "netyum@163.com"
+        }
+    ],
+    "require": {
+    },
+    "autoload": {
+        "psr-4": {
+            "wh\\wxpay\\": ""
+        }
+    }
+}
