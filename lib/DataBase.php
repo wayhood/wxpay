@@ -1,11 +1,5 @@
 <?php
-/**
-* 2015-06-29 修复签名问题
-**/
-//require_once ".Config.php";
-//require_once ".Exception.php";
-
-namespace wh\wxpay;
+namespace wh\wxpay\lib;
 
 /**
  * 

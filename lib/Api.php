@@ -1,9 +1,5 @@
 <?php
-/*require_once ".Exception.php";
-require_once ".Config.php";
-require_once ".Data.php";*/
-
-namespace wh\wxpay;
+namespace wh\wxpay\lib;
 
 /**
  * 

@@ -1,400 +1,154 @@
 <?php
-
 namespace wh\wxpay;
+
+use wh\wxpay\lib\Exception;
+use wh\wxpay\lib\OrderQuery as OrderQuery;
+use wh\wxpay\lib\Config;
+use wh\wxpay\lib\Api;
+use wh\wxpay\lib\Reverse;
 
 /**
  * 
- * 提交被扫输入对象
- * @author widyhu
+ * 刷卡支付实现类
+ * 该类实现了一个刷卡支付的流程，流程如下：
+ * 1、提交刷卡支付
+ * 2、根据返回结果决定是否需要查询订单，如果查询之后订单还未变则需要返回查询（一般反复查10次）
+ * 3、如果反复查询10订单依然不变，则发起撤销订单
+ * 4、撤销订单需要循环撤销，一直撤销成功为止（注意循环次数，建议10次）
+ * 
+ * 该类是微信支付提供的样例程序，商户可根据自己的需求修改，或者使用lib中的api自行开发，为了防止
+ * 查询时hold住后台php进程，商户查询和撤销逻辑可在前端调用
+ * 
+ * @author widy
  *
  */
-class MicroPay extends DataBase
+class MicroPay
 {
 	/**
-	* 设置微信分配的公众账号ID
-	* @param string $value 
-	**/
-	public function SetAppid($value)
+	 * 
+	 * 提交刷卡支付，并且确认结果，接口比较慢
+	 * @param MicroPay $microPayInput
+	 * @throws Exception
+	 * @return 返回查询接口的结果
+	 */
+	public function pay($microPayInput)
 	{
-		$this->values['appid'] = $value;
-	}
-	/**
-	* 获取微信分配的公众账号ID的值
-	* @return 值
-	**/
-	public function GetAppid()
-	{
-		return $this->values['appid'];
-	}
-	/**
-	* 判断微信分配的公众账号ID是否存在
-	* @return true 或 false
-	**/
-	public function IsAppidSet()
-	{
-		return array_key_exists('appid', $this->values);
-	}
+		//①、提交被扫支付
+		$result = Api::micropay($microPayInput, 5);
+		//如果返回成功
+		if(!array_key_exists("return_code", $result)
+			|| !array_key_exists("out_trade_no", $result)
+			|| !array_key_exists("result_code", $result))
+		{
+			echo "接口调用失败,请确认是否输入是否有误！";
+			throw new Exception("接口调用失败！");
+		}
+		
+		//签名验证
+		$out_trade_no = $microPayInput->GetOut_trade_no();
+		
+		//②、接口调用成功，明确返回调用失败
+		if($result["return_code"] == "SUCCESS" &&
+		   $result["result_code"] == "FAIL" && 
+		   $result["err_code"] != "USERPAYING" && 
+		   $result["err_code"] != "SYSTEMERROR")
+		{
+			return false;
+		}
 
+		//③、确认支付是否成功
+		$queryTimes = 10;
+		while($queryTimes > 0)
+		{
+			$succResult = 0;
+			$queryResult = $this->query($out_trade_no, $succResult);
+			//如果需要等待1s后继续
+			if($succResult == 2){
+				sleep(2);
+				continue;
+			} else if($succResult == 1){//查询成功
+				return $queryResult;
+			} else {//订单交易失败
+				return false;
+			}
+		}
+		
+		//④、次确认失败，则撤销订单
+		if(!$this->cancel($out_trade_no))
+		{
+			throw new WxpayException("撤销单失败！");
+		}
 
-	/**
-	* 设置微信支付分配的商户号
-	* @param string $value 
-	**/
-	public function SetMch_id($value)
-	{
-		$this->values['mch_id'] = $value;
+		return false;
 	}
+	
 	/**
-	* 获取微信支付分配的商户号的值
-	* @return 值
-	**/
-	public function GetMch_id()
+	 * 
+	 * 查询订单情况
+	 * @param string $out_trade_no  商户订单号
+	 * @param int $succCode         查询订单结果
+	 * @return 0 订单不成功，1表示订单成功，2表示继续等待
+	 */
+	public function query($out_trade_no, &$succCode)
 	{
-		return $this->values['mch_id'];
+		$queryOrderInput = new OrderQuery();
+		$queryOrderInput->SetOut_trade_no($out_trade_no);
+		$result = Api::orderQuery($queryOrderInput);
+		
+		if($result["return_code"] == "SUCCESS" 
+			&& $result["result_code"] == "SUCCESS")
+		{
+			//支付成功
+			if($result["trade_state"] == "SUCCESS"){
+				$succCode = 1;
+			   	return $result;
+			}
+			//用户支付中
+			else if($result["trade_state"] == "USERPAYING"){
+				$succCode = 2;
+				return false;
+			}
+		}
+		
+		//如果返回错误码为“此交易订单号不存在”则直接认定失败
+		if($result["err_code"] == "ORDERNOTEXIST")
+		{
+			$succCode = 0;
+		} else{
+			//如果是系统错误，则后续继续
+			$succCode = 2;
+		}
+		return false;
 	}
+	
 	/**
-	* 判断微信支付分配的商户号是否存在
-	* @return true 或 false
-	**/
-	public function IsMch_idSet()
+	 * 
+	 * 撤销订单，如果失败会重复调用10次
+	 * @param string $out_trade_no
+	 * @param 调用深度 $depth
+	 */
+	public function cancel($out_trade_no, $depth = 0)
 	{
-		return array_key_exists('mch_id', $this->values);
-	}
-
-
-	/**
-	* 设置终端设备号(商户自定义，如门店编号)
-	* @param string $value 
-	**/
-	public function SetDevice_info($value)
-	{
-		$this->values['device_info'] = $value;
-	}
-	/**
-	* 获取终端设备号(商户自定义，如门店编号)的值
-	* @return 值
-	**/
-	public function GetDevice_info()
-	{
-		return $this->values['device_info'];
-	}
-	/**
-	* 判断终端设备号(商户自定义，如门店编号)是否存在
-	* @return true 或 false
-	**/
-	public function IsDevice_infoSet()
-	{
-		return array_key_exists('device_info', $this->values);
-	}
-
-
-	/**
-	* 设置随机字符串，不长于32位。推荐随机数生成算法
-	* @param string $value 
-	**/
-	public function SetNonce_str($value)
-	{
-		$this->values['nonce_str'] = $value;
-	}
-	/**
-	* 获取随机字符串，不长于32位。推荐随机数生成算法的值
-	* @return 值
-	**/
-	public function GetNonce_str()
-	{
-		return $this->values['nonce_str'];
-	}
-	/**
-	* 判断随机字符串，不长于32位。推荐随机数生成算法是否存在
-	* @return true 或 false
-	**/
-	public function IsNonce_strSet()
-	{
-		return array_key_exists('nonce_str', $this->values);
-	}
-
-	/**
-	* 设置商品或支付单简要描述
-	* @param string $value 
-	**/
-	public function SetBody($value)
-	{
-		$this->values['body'] = $value;
-	}
-	/**
-	* 获取商品或支付单简要描述的值
-	* @return 值
-	**/
-	public function GetBody()
-	{
-		return $this->values['body'];
-	}
-	/**
-	* 判断商品或支付单简要描述是否存在
-	* @return true 或 false
-	**/
-	public function IsBodySet()
-	{
-		return array_key_exists('body', $this->values);
-	}
-
-
-	/**
-	* 设置商品名称明细列表
-	* @param string $value 
-	**/
-	public function SetDetail($value)
-	{
-		$this->values['detail'] = $value;
-	}
-	/**
-	* 获取商品名称明细列表的值
-	* @return 值
-	**/
-	public function GetDetail()
-	{
-		return $this->values['detail'];
-	}
-	/**
-	* 判断商品名称明细列表是否存在
-	* @return true 或 false
-	**/
-	public function IsDetailSet()
-	{
-		return array_key_exists('detail', $this->values);
-	}
-
-
-	/**
-	* 设置附加数据，在查询API和支付通知中原样返回，该字段主要用于商户携带订单的自定义数据
-	* @param string $value 
-	**/
-	public function SetAttach($value)
-	{
-		$this->values['attach'] = $value;
-	}
-	/**
-	* 获取附加数据，在查询API和支付通知中原样返回，该字段主要用于商户携带订单的自定义数据的值
-	* @return 值
-	**/
-	public function GetAttach()
-	{
-		return $this->values['attach'];
-	}
-	/**
-	* 判断附加数据，在查询API和支付通知中原样返回，该字段主要用于商户携带订单的自定义数据是否存在
-	* @return true 或 false
-	**/
-	public function IsAttachSet()
-	{
-		return array_key_exists('attach', $this->values);
-	}
-
-
-	/**
-	* 设置商户系统内部的订单号,32个字符内、可包含字母, 其他说明见商户订单号
-	* @param string $value 
-	**/
-	public function SetOut_trade_no($value)
-	{
-		$this->values['out_trade_no'] = $value;
-	}
-	/**
-	* 获取商户系统内部的订单号,32个字符内、可包含字母, 其他说明见商户订单号的值
-	* @return 值
-	**/
-	public function GetOut_trade_no()
-	{
-		return $this->values['out_trade_no'];
-	}
-	/**
-	* 判断商户系统内部的订单号,32个字符内、可包含字母, 其他说明见商户订单号是否存在
-	* @return true 或 false
-	**/
-	public function IsOut_trade_noSet()
-	{
-		return array_key_exists('out_trade_no', $this->values);
-	}
-
-
-	/**
-	* 设置订单总金额，单位为分，只能为整数，详见支付金额
-	* @param string $value 
-	**/
-	public function SetTotal_fee($value)
-	{
-		$this->values['total_fee'] = $value;
-	}
-	/**
-	* 获取订单总金额，单位为分，只能为整数，详见支付金额的值
-	* @return 值
-	**/
-	public function GetTotal_fee()
-	{
-		return $this->values['total_fee'];
-	}
-	/**
-	* 判断订单总金额，单位为分，只能为整数，详见支付金额是否存在
-	* @return true 或 false
-	**/
-	public function IsTotal_feeSet()
-	{
-		return array_key_exists('total_fee', $this->values);
-	}
-
-
-	/**
-	* 设置符合ISO 4217标准的三位字母代码，默认人民币：CNY，其他值列表详见货币类型
-	* @param string $value 
-	**/
-	public function SetFee_type($value)
-	{
-		$this->values['fee_type'] = $value;
-	}
-	/**
-	* 获取符合ISO 4217标准的三位字母代码，默认人民币：CNY，其他值列表详见货币类型的值
-	* @return 值
-	**/
-	public function GetFee_type()
-	{
-		return $this->values['fee_type'];
-	}
-	/**
-	* 判断符合ISO 4217标准的三位字母代码，默认人民币：CNY，其他值列表详见货币类型是否存在
-	* @return true 或 false
-	**/
-	public function IsFee_typeSet()
-	{
-		return array_key_exists('fee_type', $this->values);
-	}
-
-
-	/**
-	* 设置调用微信支付API的机器IP 
-	* @param string $value 
-	**/
-	public function SetSpbill_create_ip($value)
-	{
-		$this->values['spbill_create_ip'] = $value;
-	}
-	/**
-	* 获取调用微信支付API的机器IP 的值
-	* @return 值
-	**/
-	public function GetSpbill_create_ip()
-	{
-		return $this->values['spbill_create_ip'];
-	}
-	/**
-	* 判断调用微信支付API的机器IP 是否存在
-	* @return true 或 false
-	**/
-	public function IsSpbill_create_ipSet()
-	{
-		return array_key_exists('spbill_create_ip', $this->values);
-	}
-
-
-	/**
-	* 设置订单生成时间，格式为yyyyMMddHHmmss，如2009年12月25日9点10分10秒表示为20091225091010。详见时间规则
-	* @param string $value 
-	**/
-	public function SetTime_start($value)
-	{
-		$this->values['time_start'] = $value;
-	}
-	/**
-	* 获取订单生成时间，格式为yyyyMMddHHmmss，如2009年12月25日9点10分10秒表示为20091225091010。详见时间规则的值
-	* @return 值
-	**/
-	public function GetTime_start()
-	{
-		return $this->values['time_start'];
-	}
-	/**
-	* 判断订单生成时间，格式为yyyyMMddHHmmss，如2009年12月25日9点10分10秒表示为20091225091010。详见时间规则是否存在
-	* @return true 或 false
-	**/
-	public function IsTime_startSet()
-	{
-		return array_key_exists('time_start', $this->values);
-	}
-
-
-	/**
-	* 设置订单失效时间，格式为yyyyMMddHHmmss，如2009年12月27日9点10分10秒表示为20091227091010。详见时间规则
-	* @param string $value 
-	**/
-	public function SetTime_expire($value)
-	{
-		$this->values['time_expire'] = $value;
-	}
-	/**
-	* 获取订单失效时间，格式为yyyyMMddHHmmss，如2009年12月27日9点10分10秒表示为20091227091010。详见时间规则的值
-	* @return 值
-	**/
-	public function GetTime_expire()
-	{
-		return $this->values['time_expire'];
-	}
-	/**
-	* 判断订单失效时间，格式为yyyyMMddHHmmss，如2009年12月27日9点10分10秒表示为20091227091010。详见时间规则是否存在
-	* @return true 或 false
-	**/
-	public function IsTime_expireSet()
-	{
-		return array_key_exists('time_expire', $this->values);
-	}
-
-
-	/**
-	* 设置商品标记，代金券或立减优惠功能的参数，说明详见代金券或立减优惠
-	* @param string $value 
-	**/
-	public function SetGoods_tag($value)
-	{
-		$this->values['goods_tag'] = $value;
-	}
-	/**
-	* 获取商品标记，代金券或立减优惠功能的参数，说明详见代金券或立减优惠的值
-	* @return 值
-	**/
-	public function GetGoods_tag()
-	{
-		return $this->values['goods_tag'];
-	}
-	/**
-	* 判断商品标记，代金券或立减优惠功能的参数，说明详见代金券或立减优惠是否存在
-	* @return true 或 false
-	**/
-	public function IsGoods_tagSet()
-	{
-		return array_key_exists('goods_tag', $this->values);
-	}
-
-
-	/**
-	* 设置扫码支付授权码，设备读取用户微信中的条码或者二维码信息
-	* @param string $value 
-	**/
-	public function SetAuth_code($value)
-	{
-		$this->values['auth_code'] = $value;
-	}
-	/**
-	* 获取扫码支付授权码，设备读取用户微信中的条码或者二维码信息的值
-	* @return 值
-	**/
-	public function GetAuth_code()
-	{
-		return $this->values['auth_code'];
-	}
-	/**
-	* 判断扫码支付授权码，设备读取用户微信中的条码或者二维码信息是否存在
-	* @return true 或 false
-	**/
-	public function IsAuth_codeSet()
-	{
-		return array_key_exists('auth_code', $this->values);
+		if($depth > 10){
+			return false;
+		}
+		
+		$clostOrder = new Reverse();
+		$clostOrder->SetOut_trade_no($out_trade_no);
+		$result = Api::reverse($clostOrder);
+		
+		//接口调用失败
+		if($result["return_code"] != "SUCCESS"){
+			return false;
+		}
+		
+		//如果结果为success且不需要重新调用撤销，则表示撤销成功
+		if($result["result_code"] != "SUCCESS" 
+			&& $result["recall"] == "N"){
+			return true;
+		} else if($result["recall"] == "Y") {
+			return $this->cancel($out_trade_no, ++$depth);
+		}
+		return false;
 	}
 }

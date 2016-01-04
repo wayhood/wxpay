@@ -1,4 +1,5 @@
 <?php
+namespace wh\wxpay\lib;
 /**
  * 
  * 回调基础类

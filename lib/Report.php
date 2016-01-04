@@ -1,6 +1,5 @@
 <?php
-
-namespace wh\wxpay;
+namespace wh\wxpay\lib;
 
 /**
  * 
